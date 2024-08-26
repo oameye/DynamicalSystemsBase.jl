@@ -5,9 +5,9 @@ using DynamicalSystemsBase: DynamicalSystemsBase, SciMLBase, correct_state, Coup
                             set_state!, dynamic_rule, isdeterministic, current_state,
                             DynamicalSystemsBase, _set_parameter!, u_modified!,
                             additional_details, referrenced_sciml_prob, DEFAULT_DIFFEQ,
-                            SVector, SMatrix, current_parameters
+                            SVector, current_parameters
 using SciMLBase: SDEProblem, AbstractSDEIntegrator, __init, SDEFunction, step!
-using StochasticDiffEq: LambaEM
+using StochasticDiffEq: LambaEM, CorrelatedWienerProcess, CorrelatedWienerProcess!
 using LinearAlgebra
 
 include("src/CoupledSDEs.jl")

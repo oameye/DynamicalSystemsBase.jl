@@ -49,6 +49,8 @@ lor_SRA = CoupledSDEs(lorenz_rule, u0, p0;
 )
 
 lor_oop_cov = CoupledSDEs(lorenz_rule, u0, p0; covariance = Γ)
+step!(lor_oop_cov, 1.0)
+test_dynamical_system(lor_oop_cov, u0, p0; idt = false, iip = false)
 lor_iip_cov = CoupledSDEs(lorenz_rule_iip, u0, p0; covariance = Γ)
 
 for (ds, iip) in zip(

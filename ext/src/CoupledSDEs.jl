@@ -41,9 +41,9 @@ function DynamicalSystemsBase.CoupledSDEs(
         @assert IIP==isinplace(g, 4) "f and g must both be in-place or out-of-place"
     end
 
-    noise_type, cov = find_noise_type(g, u0, p, t0, noise_process, covariance, noise_prototype, IIP)
-    g, noise_prototype = construct_diffusion_function(
-        g, cov, noise_prototype, noise_strength, length(u0), IIP)
+    noise_type = find_noise_type(g, u0, p, t0, noise_process, covariance, noise_prototype, IIP)
+    noise = construct_noise_process(u0, covariance, noise_process, IIP)
+    g = construct_diffusion_function(g, u0, noise_strength, IIP)
 
     s = correct_state(Val{IIP}(), u0)
     T = eltype(s)
@@ -54,7 +54,7 @@ function DynamicalSystemsBase.CoupledSDEs(
         (T(t0), T(Inf)),
         p;
         noise_rate_prototype = noise_prototype,
-        noise = noise_process,
+        noise = noise,
         seed = seed
     )
     return CoupledSDEs(prob, diffeq, noise_type)
@@ -79,7 +79,7 @@ function DynamicalSystemsBase.CoupledSDEs(
         prob = SciMLBase.remake(prob; tspan = (U(0), U(Inf)))
     end
     if isnothing(noise_type)
-        noise_type, _ = find_noise_type(prob, IIP)
+        noise_type = find_noise_type(prob, IIP)
     end
 
     solver, remaining = _decompose_into_sde_solver_and_remaining(diffeq)
@@ -195,15 +195,31 @@ end
 
 DynamicalSystemsBase.referrenced_sciml_prob(ds::CoupledSDEs) = ds.integ.sol.prob
 
-function covariance(ds::CoupledSDEs)
-    A = diffusion_matrix(ds)
-    A * A'
+function covariance(ds::CoupledSDEs{IIP, D}) where {IIP, D}
+   prob = referrenced_sciml_prob(ds)
+   Σ = ds.integ.noise.covariance
+   if isnothing(cov) &&  ds.noise_type[:invertible]
+        if !isnothing(prob.noise_rate_prototype)
+            A = diffusion_matrix(ds)
+            Σ = A * A'
+        else
+            Σ = LinearAlgebra.I(D) # LinearAlgebra/#The-uniform-scaling-operator
+        end
+   end
+   return Σ
 end
 
 function diffusion_matrix(ds::CoupledSDEs{IIP, D}) where {IIP, D}
+    prob = referrenced_sciml_prob(ds)
+    prototype = prob.noise_rate_prototype
     if ds.noise_type[:invertible]
-        diffusion = diffusion_function(ds)
-        A = diffusion(zeros(D), current_parameters(ds), 0.0)
+        if !isnothing(prototype)
+            diffusion = diffusion_function(ds, IIP, prototype)
+            A = diffusion(zeros(D), current_parameters(ds), 0.0)
+        else
+            Σ = covariance(ds::CoupledSDEs)
+            A = diffusion_matrix(Γ::AbstractMatrix)
+       end
     else
         A = nothing
     end
@@ -223,31 +239,70 @@ function diffusion_matrix(Γ::AbstractMatrix)
     return A
 end
 
-"""
-https://docs.julialang.org/en/v1/stdlib/LinearAlgebra/#The-uniform-scaling-operator
-"""
-function construct_diffusion_function(g, cov, noise_prototype, σ, D, IIP)
-    if isnothing(g) # diagonal additive noise
-        cov = isnothing(cov) ? LinearAlgebra.I(D) : cov
-        size(cov)[1] != D &&
-            throw(ArgumentError("covariance matrix must be of size $((D, D))"))
-        A = diffusion_matrix(cov)
-        if IIP
-            if isdiag(cov)
-                g = (du, u, p, t) -> du .= σ .* diag(A)
-            else
-                g = (du, u, p, t) -> du .= σ .* A
-                noise_prototype = zeros(size(A))
-                # ^ we could make this sparse to make it more performant
-            end
-        else
-            if isdiag(cov)
-                g = (u, p, t) -> SVector{length(diag(A)), eltype(A)}(diag(σ .* A))
-            else
-                g = (u, p, t) -> SMatrix{size(A)..., eltype(A)}(σ .* A)
-                noise_prototype = zeros(size(A))
-            end
-        end
-    end
-    return g, noise_prototype
+function σg(σ, g)
+    return (u, p, t) -> σ .* g(u, p, t)
 end
+function σg!(σ, g!)
+    function (du, u, p, t)
+        g!(du, u, p, t)
+        du .*= σ
+        return nothing
+    end
+end
+
+function add_noise_strength(σ, g, IIP)
+    newg = IIP ? σg!(σ, g) : σg(σ, g)
+    return newg
+end
+function make_correlated_process(cov, u0, IIP)
+    if IIP
+        W0 = zeros(eltype(u0), length(u0))
+        noise = CorrelatedWienerProcess!(cov, 0.0, W0, W0)
+    else
+        W0 = SVector{length(u0)}(zeros(eltype(u0), length(u0)))
+        noise = CorrelatedWienerProcess(cov, 0.0, W0, W0)
+    end
+    noise
+end
+function construct_noise_process(u0, cov, noise, IIP)
+    if isnothing(noise) && !isnothing(cov)
+        noise = make_correlated_process(cov, u0, IIP)
+    elseif !isnothing(noise) && !isnothing(cov)
+        throw(
+            ArgumentError(
+            "Both `noise_process` and `covariance` are provided. If the `covariance` is not encoded in the `noise_process`,
+            opt to encode the covariance in the difussion function `g` with the `noise_prototype` kwarg.")
+        )
+    end
+    return noise
+end
+function construct_diffusion_function(g, u0, σ, IIP)
+    if isnothing(g) # diagonal additive noise
+        g_tmp = ifelse(IIP,
+            (du, u, p, t) -> du .= ones(eltype(u0), length(u0)),
+            (u, p, t) -> SVector{length(u0)}(ones(eltype(u0), length(u0)))
+        )
+        g = add_noise_strength(σ, g_tmp, IIP)
+    else
+        g = add_noise_strength(σ, g, IIP)
+    end
+    return g
+end
+
+### g, cov, σ, noise = nothing
+# -> g is ones(D)
+# -> noise nothing
+### g, cov, noise = nothing; σ::Float64
+# -> g = σ*ones(D)
+# -> noise nothing
+### g, noise = nothing; σ::Float64, cov::AbstractMatrix
+# -> g = σ*ones(D)
+# -> noise = CorrelatedWienerProcess(cov)
+### noise = nothing; σ::Float64, cov::AbstractMatrix, g::Function
+# -> g = σ*g
+# -> noise = CorrelatedWienerProcess(cov)
+### g, σ = nothing; cov::AbstractMatrix, noise::NoiseProcess
+# ArgumentError
+### cov = nothing; g::Function, σ::Float64, noise::NoiseProcess
+# -> g = σ*g
+# -> noise = NoiseProcess

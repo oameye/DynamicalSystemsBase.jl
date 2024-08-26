@@ -103,7 +103,7 @@ function find_noise_type(g, u0, p, t0, noise, covariance, noise_prototype, IIP)
 
     noise_type = (additive = isadditive, autonomous = isautonomous,
         linear = islinear, invertible = isinvertible)
-    return noise_type, covariance
+    return noise_type
 end
 
 function find_noise_type(prob::SDEProblem, IIP)
